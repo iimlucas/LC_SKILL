@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import NoTranscriptFound
 
 
 def hms(seconds: float) -> str:
@@ -15,7 +16,9 @@ def hms(seconds: float) -> str:
     h = s // 3600
     m = (s % 3600) // 60
     sec = s % 60
-    return f"[{h:02d}:{m:02d}:{sec:02d}]"
+    if h > 0:
+        return f"[{h:02d}:{m:02d}:{sec:02d}]"
+    return f"[{m:02d}:{sec:02d}]"
 
 
 def seconds_text(seconds: float) -> str:
@@ -58,7 +61,19 @@ def get_metadata(url: str) -> dict:
 
 def get_transcript(video_id: str):
     api = YouTubeTranscriptApi()
-    fetched = api.fetch(video_id)
+    preferred = ["en", "zh-CN", "zh", "zh-Hans", "zh-Hant"]
+    fetched = None
+
+    try:
+        fetched = api.fetch(video_id, languages=preferred)
+    except NoTranscriptFound:
+        # fallback: pick the first available transcript
+        tl = api.list(video_id)
+        t = next(iter(tl), None)
+        if t is None:
+            raise
+        fetched = t.fetch()
+
     entries = []
     for item in fetched:
         entries.append({"start": float(item.start), "text": (item.text or "").strip()})
@@ -98,11 +113,19 @@ def is_non_speech(text: str) -> bool:
     t = text.strip()
     if not t:
         return False
-    if re.fullmatch(r"[\[(].*[\])]", t):
+    if re.fullmatch(r"[\[(（【].*[\])）】]", t):
         return True
     low = t.lower()
-    markers = ["laughter", "music", "applause", "laughs", "[音乐", "[笑", "（笑"]
+    markers = ["laughter", "music", "applause", "laughs", "[音乐", "[笑", "（笑", "【音乐", "【笑"]
     return any(m in low for m in markers)
+
+
+def clean_caption_text(text: str) -> str:
+    t = text.strip()
+    t = re.sub(r"^>+\s*", "", t)
+    t = re.sub(r"\s+", " ", t)
+    t = t.replace("[", "").replace("]", "")
+    return t.strip()
 
 
 def flush_paragraph(out: list, speaker: str, buf: list, last_ts: float, labeled: bool) -> bool:
@@ -159,21 +182,6 @@ def render(meta: dict, chapters: list, transcript: list, source_url: str, vid: s
 
     out.append(f"# {title}\n")
 
-    out.append("## Video Info")
-    out.append(f"- URL: {webpage_url}")
-    if uploader:
-        out.append(f"- Channel: {uploader}")
-    if channel_url:
-        out.append(f"- Channel URL: {channel_url}")
-    if published:
-        out.append(f"- Published: {published}")
-    out.append(f"- Duration: {seconds_text(duration)}")
-    out.append("")
-
-    out.append("## Description\n")
-    out.append(description if description else "[No description]")
-    out.append("")
-
     out.append("## Table of Contents\n")
     for c in chapters:
         out.append(f"* {hms(c['start'])} {c['title']}")
@@ -188,14 +196,14 @@ def render(meta: dict, chapters: list, transcript: list, source_url: str, vid: s
             out.append("")
             continue
 
-        speaker = "Speaker 1"
+        speaker = uploader if uploader else "Speaker 1"
         labeled = False
         buf = []
         buf_sentences = 0
         last_ts = c["start"]
 
         for r in rows:
-            text = r["text"].replace("\n", " ").strip()
+            text = clean_caption_text(r["text"].replace("\n", " "))
             if not text:
                 continue
 
@@ -219,6 +227,19 @@ def render(meta: dict, chapters: list, transcript: list, source_url: str, vid: s
 
         labeled = flush_paragraph(out, speaker, buf, last_ts, labeled)
         out.append("")
+
+    out.append("## Metadata\n")
+    out.append(f"- URL: {webpage_url}")
+    if uploader:
+        out.append(f"- Channel: {uploader}")
+    if channel_url:
+        out.append(f"- Channel URL: {channel_url}")
+    if published:
+        out.append(f"- Published: {published}")
+    out.append(f"- Duration: {seconds_text(duration)}")
+    out.append("")
+    out.append("## Description\n")
+    out.append(description if description else "[No description]")
 
     return "\n".join(out).rstrip() + "\n"
 
