@@ -144,7 +144,7 @@ def asr_fallback(video_url: str):
         if audio_file is None:
             raise RuntimeError("failed to download audio for ASR")
 
-        subprocess.run(
+        whisper_cmds = [
             [
                 sys.executable,
                 "-m",
@@ -159,12 +159,33 @@ def asr_fallback(video_url: str):
                 "--output_dir",
                 tmp,
             ],
-            check=True,
-            env=env,
-        )
+            [
+                sys.executable,
+                "-m",
+                "whisper",
+                str(audio_file),
+                "--model",
+                "base",
+                "--task",
+                "transcribe",
+                "--output_format",
+                "json",
+                "--output_dir",
+                tmp,
+            ],
+        ]
+        whisper_ok = False
+        for wcmd in whisper_cmds:
+            try:
+                subprocess.run(wcmd, check=True, env=env)
+                whisper_ok = True
+                break
+            except subprocess.CalledProcessError:
+                continue
 
-        json_out = Path(tmp) / f"{audio_file.stem}.json"
-        if not json_out.exists():
+        json_candidates = sorted(Path(tmp).glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        json_out = json_candidates[0] if json_candidates else None
+        if not whisper_ok or json_out is None:
             raise RuntimeError("whisper did not produce json output")
 
         data = json.loads(json_out.read_text(encoding="utf-8"))
