@@ -6,6 +6,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from shutil import which
 
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import NoTranscriptFound
@@ -16,9 +17,7 @@ def hms(seconds: float) -> str:
     h = s // 3600
     m = (s % 3600) // 60
     sec = s % 60
-    if h > 0:
-        return f"[{h:02d}:{m:02d}:{sec:02d}]"
-    return f"[{m:02d}:{sec:02d}]"
+    return f"[{h:02d}:{m:02d}:{sec:02d}]"
 
 
 def seconds_text(seconds: float) -> str:
@@ -84,6 +83,25 @@ def build_chapters(meta: dict):
     ch = meta.get("chapters") or []
     if ch:
         return [{"start": float(c.get("start_time", 0)), "title": c.get("title") or "Chapter"} for c in ch]
+
+    desc = (meta.get("description") or "")
+    parsed = []
+    for line in desc.splitlines():
+        m = re.match(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*[–-]?\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        if m.group(3) is None:
+            mm, ss = int(m.group(1)), int(m.group(2))
+            start = mm * 60 + ss
+        else:
+            hh, mm, ss = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            start = hh * 3600 + mm * 60 + ss
+        title = m.group(4).strip()
+        if title:
+            parsed.append({"start": float(start), "title": title})
+    if parsed:
+        return parsed
+
     return [{"start": 0.0, "title": "Transcript"}]
 
 
@@ -160,36 +178,17 @@ def render(meta: dict, chapters: list, transcript: list, source_url: str, vid: s
     duration = meta.get("duration") or 0
 
     out = []
-    out.append("---")
-    out.append('type: "youtube-transcript"')
-    out.append(f'title: "{title.replace(chr(34), chr(39))}"')
-    out.append(f'video_id: "{vid}"')
-    out.append(f'video_url: "{webpage_url}"')
-    if uploader:
-        out.append(f'channel: "{uploader.replace(chr(34), chr(39))}"')
-    if channel_url:
-        out.append(f'channel_url: "{channel_url}"')
-    if published:
-        out.append(f'published_date: "{published}"')
-    out.append(f'duration_seconds: {int(duration)}')
-    out.append(f'duration_text: "{seconds_text(duration)}"')
-    if thumbnail:
-        out.append(f'thumbnail: "{thumbnail}"')
-    out.append(f'captured_at: "{datetime.now().isoformat(timespec="seconds")}"')
-    out.append(f'prompt_source: "{prompt_path}"')
-    out.append('tags: ["youtube", "transcript"]')
-    out.append("---\n")
-
-    out.append(f"# {title}\n")
-
-    out.append("## Table of Contents\n")
+    out.append(title)
+    out.append("")
+    out.append("Table of Contents")
+    out.append("")
     for c in chapters:
         out.append(f"* {hms(c['start'])} {c['title']}")
 
     out.append("")
-    out.append("## Transcript\n")
     for i, c in enumerate(chapters):
-        out.append(f"{hms(c['start'])} {c['title']}\n")
+        out.append(f"{hms(c['start'])} {c['title']}")
+        out.append("")
         rows = grouped.get(i, [])
         if not rows:
             out.append(f"[No transcript in this chapter] {hms(c['start'])}\n")
@@ -228,20 +227,61 @@ def render(meta: dict, chapters: list, transcript: list, source_url: str, vid: s
         labeled = flush_paragraph(out, speaker, buf, last_ts, labeled)
         out.append("")
 
-    out.append("## Metadata\n")
-    out.append(f"- URL: {webpage_url}")
-    if uploader:
-        out.append(f"- Channel: {uploader}")
-    if channel_url:
-        out.append(f"- Channel URL: {channel_url}")
-    if published:
-        out.append(f"- Published: {published}")
-    out.append(f"- Duration: {seconds_text(duration)}")
-    out.append("")
-    out.append("## Description\n")
-    out.append(description if description else "[No description]")
-
     return "\n".join(out).rstrip() + "\n"
+
+
+def transcript_as_lines(transcript: list) -> str:
+    lines = []
+    for r in transcript:
+        text = clean_caption_text((r.get("text") or "").replace("\n", " "))
+        if not text:
+            continue
+        lines.append(f"{hms(float(r.get('start', 0)))} {text}")
+    return "\n".join(lines)
+
+
+def render_with_gemini(meta: dict, chapters: list, transcript: list, source_url: str, prompt_text: str) -> str:
+    if which("gemini") is None:
+        raise RuntimeError("gemini CLI not found")
+
+    title = (meta.get("title") or "YouTube Transcript").strip()
+    uploader = meta.get("uploader") or meta.get("channel") or "Speaker 1"
+    chapter_text = "\n".join([f"- {hms(c['start'])} {c['title']}" for c in chapters])
+    transcript_lines = transcript_as_lines(transcript)
+
+    instruction = f"""
+You must strictly follow the following prompt spec when formatting output.
+
+--- SPEC START ---
+{prompt_text.strip()}
+--- SPEC END ---
+
+Now produce final transcript for this video:
+- Title: {title}
+- URL: {source_url}
+- Speaker hint: {uploader}
+
+Detected chapters:
+{chapter_text}
+
+Raw transcript lines (verbatim, do not translate):
+{transcript_lines}
+
+Hard constraints:
+1) Output only the final formatted transcript body. No extra commentary.
+2) Keep transcript language exactly as source transcript.
+3) Timestamp format must be [HH:MM:SS] everywhere.
+4) Include title line, then Table of Contents, then full chapter-segmented transcript.
+5) Follow Dialogue Paragraphs rule in the spec exactly.
+""".strip()
+
+    proc = subprocess.run(["gemini", instruction], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "gemini command failed")
+    output = (proc.stdout or "").strip()
+    if not output:
+        raise RuntimeError("gemini returned empty output")
+    return output + "\n"
 
 
 def main():
@@ -254,14 +294,25 @@ def main():
 
     vault = Path(args.vault).expanduser()
     prompt_path = vault / args.prompt
-    if not prompt_path.exists():
+    prompt_text = ""
+    if prompt_path.exists():
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+    else:
         print(f"WARN: prompt file not found: {prompt_path}")
 
     meta = get_metadata(args.url)
     vid = video_id_from_url(args.url)
     transcript = get_transcript(vid)
     chapters = build_chapters(meta)
-    note = render(meta, chapters, transcript, args.url, vid, args.prompt)
+
+    try:
+        if prompt_text:
+            note = render_with_gemini(meta, chapters, transcript, args.url, prompt_text)
+        else:
+            note = render(meta, chapters, transcript, args.url, vid, args.prompt)
+    except Exception as e:
+        print(f"WARN: gemini formatting failed, fallback to local renderer: {e}")
+        note = render(meta, chapters, transcript, args.url, vid, args.prompt)
 
     out_dir = vault / args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
