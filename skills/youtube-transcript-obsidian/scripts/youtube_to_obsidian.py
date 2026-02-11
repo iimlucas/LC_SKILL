@@ -77,10 +77,17 @@ def asr_fallback(video_url: str):
         raise RuntimeError("ffmpeg not found; cannot run ASR fallback")
 
     env = dict(**__import__("os").environ)
-    ffmpeg_dir = str(Path(ffmpeg_exe).parent)
-    env["PATH"] = ffmpeg_dir + ":" + env.get("PATH", "")
 
     with tempfile.TemporaryDirectory(prefix="yt-asr-") as tmp:
+        # whisper expects executable name `ffmpeg`; imageio ships versioned filename
+        ffmpeg_link = Path(tmp) / "ffmpeg"
+        try:
+            ffmpeg_link.symlink_to(Path(ffmpeg_exe))
+        except Exception:
+            pass
+        env["PATH"] = str(Path(tmp)) + ":" + env.get("PATH", "")
+        env["IMAGEIO_FFMPEG_EXE"] = ffmpeg_exe
+
         audio_path = f"{tmp}/audio.%(ext)s"
         ytdlp_attempts = [
             [
@@ -151,7 +158,7 @@ def asr_fallback(video_url: str):
                 "whisper",
                 str(audio_file),
                 "--model",
-                "turbo",
+                "tiny",
                 "--task",
                 "transcribe",
                 "--output_format",
@@ -199,7 +206,11 @@ def asr_fallback(video_url: str):
         return entries
 
 
-def get_transcript(video_id: str, video_url: str):
+def get_transcript(video_id: str, video_url: str, force_asr: bool = False):
+    if force_asr:
+        entries = asr_fallback(video_url)
+        return [e for e in entries if e["text"]], "asr-fallback"
+
     api = YouTubeTranscriptApi()
     preferred = ["en", "zh-CN", "zh", "zh-Hans", "zh-Hant"]
     fetched = None
@@ -427,6 +438,7 @@ def main():
     ap.add_argument("--vault", required=True)
     ap.add_argument("--out-dir", default="Inbox/YouTube Transcripts")
     ap.add_argument("--prompt", default="Inbox/Youtube Transcript prompt.md")
+    ap.add_argument("--force-asr", action="store_true")
     args = ap.parse_args()
 
     vault = Path(args.vault).expanduser()
@@ -439,7 +451,7 @@ def main():
 
     meta = get_metadata(args.url)
     vid = video_id_from_url(args.url)
-    transcript, transcript_source = get_transcript(vid, args.url)
+    transcript, transcript_source = get_transcript(vid, args.url, force_asr=args.force_asr)
     chapters = build_chapters(meta)
 
     try:
