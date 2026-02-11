@@ -18,6 +18,18 @@ def hms(seconds: float) -> str:
     return f"[{h:02d}:{m:02d}:{sec:02d}]"
 
 
+def seconds_text(seconds: float) -> str:
+    s = int(max(0, seconds or 0))
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
+    if h:
+        return f"{h}h {m}m {sec}s"
+    if m:
+        return f"{m}m {sec}s"
+    return f"{sec}s"
+
+
 def sanitize(name: str) -> str:
     name = re.sub(r"[\\/:*?\"<>|]", "-", name)
     return re.sub(r"\s+", " ", name).strip()[:140]
@@ -70,19 +82,73 @@ def chapter_for(ts: float, chapters: list) -> int:
     return idx
 
 
-def render(meta: dict, chapters: list, transcript: list) -> str:
+def clean_multiline(text: str) -> str:
+    text = (text or "").replace("\r\n", "\n").strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
+def render(meta: dict, chapters: list, transcript: list, source_url: str, vid: str, prompt_path: str) -> str:
     title = (meta.get("title") or "YouTube Transcript").strip()
     grouped = {i: [] for i in range(len(chapters))}
     for row in transcript:
         grouped[chapter_for(row["start"], chapters)].append(row)
 
+    uploader = meta.get("uploader") or meta.get("channel") or ""
+    channel_url = meta.get("channel_url") or ""
+    webpage_url = meta.get("webpage_url") or source_url
+    upload_date = meta.get("upload_date") or ""
+    published = ""
+    if len(upload_date) == 8 and upload_date.isdigit():
+        published = f"{upload_date[0:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+    description = clean_multiline(meta.get("description") or "")
+    thumbnail = meta.get("thumbnail") or ""
+    duration = meta.get("duration") or 0
+
     out = []
+    out.append("---")
+    out.append('type: "youtube-transcript"')
+    out.append(f'title: "{title.replace(chr(34), chr(39))}"')
+    out.append(f'video_id: "{vid}"')
+    out.append(f'video_url: "{webpage_url}"')
+    if uploader:
+        out.append(f'channel: "{uploader.replace(chr(34), chr(39))}"')
+    if channel_url:
+        out.append(f'channel_url: "{channel_url}"')
+    if published:
+        out.append(f'published_date: "{published}"')
+    out.append(f'duration_seconds: {int(duration)}')
+    out.append(f'duration_text: "{seconds_text(duration)}"')
+    if thumbnail:
+        out.append(f'thumbnail: "{thumbnail}"')
+    out.append(f'captured_at: "{datetime.now().isoformat(timespec="seconds")}"')
+    out.append(f'prompt_source: "{prompt_path}"')
+    out.append('tags: ["youtube", "transcript"]')
+    out.append("---\n")
+
     out.append(f"# {title}\n")
+
+    out.append("## Video Info")
+    out.append(f"- URL: {webpage_url}")
+    if uploader:
+        out.append(f"- Channel: {uploader}")
+    if channel_url:
+        out.append(f"- Channel URL: {channel_url}")
+    if published:
+        out.append(f"- Published: {published}")
+    out.append(f"- Duration: {seconds_text(duration)}")
+    out.append("")
+
+    out.append("## Description\n")
+    out.append(description if description else "[No description]")
+    out.append("")
+
     out.append("## Table of Contents\n")
     for c in chapters:
         out.append(f"* {hms(c['start'])} {c['title']}")
 
     out.append("")
+    out.append("## Transcript\n")
     for i, c in enumerate(chapters):
         out.append(f"{hms(c['start'])} {c['title']}\n")
         rows = grouped.get(i, [])
@@ -123,7 +189,7 @@ def main():
     vid = video_id_from_url(args.url)
     transcript = get_transcript(vid)
     chapters = build_chapters(meta)
-    note = render(meta, chapters, transcript)
+    note = render(meta, chapters, transcript, args.url, vid, args.prompt)
 
     out_dir = vault / args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
