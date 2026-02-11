@@ -88,6 +88,37 @@ def clean_multiline(text: str) -> str:
     return text
 
 
+def sentence_count(text: str) -> int:
+    parts = re.split(r"(?<=[.!?。！？])\s+", text.strip())
+    parts = [p for p in parts if p.strip()]
+    return max(1, len(parts))
+
+
+def is_non_speech(text: str) -> bool:
+    t = text.strip()
+    if not t:
+        return False
+    if re.fullmatch(r"[\[(].*[\])]", t):
+        return True
+    low = t.lower()
+    markers = ["laughter", "music", "applause", "laughs", "[音乐", "[笑", "（笑"]
+    return any(m in low for m in markers)
+
+
+def flush_paragraph(out: list, speaker: str, buf: list, last_ts: float, labeled: bool) -> bool:
+    if not buf:
+        return labeled
+    text = " ".join(buf).strip()
+    line = f"{text} {hms(last_ts)}"
+    if not labeled:
+        line = f"{speaker}: {line}"
+        labeled = True
+    out.append(line)
+    out.append("")
+    buf.clear()
+    return labeled
+
+
 def render(meta: dict, chapters: list, transcript: list, source_url: str, vid: str, prompt_path: str) -> str:
     title = (meta.get("title") or "YouTube Transcript").strip()
     grouped = {i: [] for i in range(len(chapters))}
@@ -156,17 +187,37 @@ def render(meta: dict, chapters: list, transcript: list, source_url: str, vid: s
             out.append(f"[No transcript in this chapter] {hms(c['start'])}\n")
             out.append("")
             continue
-        first = True
+
+        speaker = "Speaker 1"
+        labeled = False
+        buf = []
+        buf_sentences = 0
+        last_ts = c["start"]
+
         for r in rows:
             text = r["text"].replace("\n", " ").strip()
             if not text:
                 continue
-            line = f"{text} {hms(r['start'])}"
-            if first:
-                line = f"Speaker 1: {line}"
-                first = False
-            out.append(line)
-            out.append("")
+
+            if is_non_speech(text):
+                labeled = flush_paragraph(out, speaker, buf, last_ts, labeled)
+                event = text
+                if not (event.startswith("[") and event.endswith("]")):
+                    event = f"[{event}]"
+                out.append(f"{event} {hms(r['start'])}")
+                out.append("")
+                continue
+
+            buf.append(text)
+            buf_sentences += sentence_count(text)
+            last_ts = r["start"]
+
+            # Dialogue paragraphs: roughly 2-4 sentences per paragraph
+            if buf_sentences >= 3:
+                labeled = flush_paragraph(out, speaker, buf, last_ts, labeled)
+                buf_sentences = 0
+
+        labeled = flush_paragraph(out, speaker, buf, last_ts, labeled)
         out.append("")
 
     return "\n".join(out).rstrip() + "\n"
