@@ -10,5 +10,6 @@ LC 的 OpenClaw skill 备份与部署仓库。
 ## 当前已收录
 
 - `xiaoyuzhou-dl`
+- `youtube-transcript-obsidian`
 
 后续新增/更新 skill，统一提交到本仓库，便于备份与快速部署。
