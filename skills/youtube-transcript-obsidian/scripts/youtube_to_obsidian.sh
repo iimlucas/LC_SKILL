@@ -35,7 +35,7 @@ if [[ -z "$URL" ]]; then
   exit 1
 fi
 
-python3 -m pip install --user -q yt-dlp youtube-transcript-api
+python3 -m pip install --user -q yt-dlp youtube-transcript-api openai-whisper imageio-ffmpeg
 
 python3 "$SCRIPT_DIR/youtube_to_obsidian.py" \
   --url "$URL" \

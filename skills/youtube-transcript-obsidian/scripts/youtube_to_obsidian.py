@@ -4,12 +4,13 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from shutil import which
 
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import NoTranscriptFound
+from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
 
 
 def hms(seconds: float) -> str:
@@ -58,25 +59,139 @@ def get_metadata(url: str) -> dict:
     return json.loads(proc.stdout)
 
 
-def get_transcript(video_id: str):
+def get_ffmpeg_exe() -> str:
+    exe = which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return ""
+
+
+def asr_fallback(video_url: str):
+    ffmpeg_exe = get_ffmpeg_exe()
+    if not ffmpeg_exe:
+        raise RuntimeError("ffmpeg not found; cannot run ASR fallback")
+
+    env = dict(**__import__("os").environ)
+    ffmpeg_dir = str(Path(ffmpeg_exe).parent)
+    env["PATH"] = ffmpeg_dir + ":" + env.get("PATH", "")
+
+    with tempfile.TemporaryDirectory(prefix="yt-asr-") as tmp:
+        audio_path = f"{tmp}/audio.%(ext)s"
+        ytdlp_attempts = [
+            [
+                sys.executable,
+                "-m",
+                "yt_dlp",
+                "-q",
+                "--extractor-args",
+                "youtube:player_client=android",
+                "-f",
+                "bestaudio/best",
+                "-o",
+                audio_path,
+                video_url,
+            ],
+            [
+                sys.executable,
+                "-m",
+                "yt_dlp",
+                "-q",
+                "--cookies-from-browser",
+                "chrome",
+                "--extractor-args",
+                "youtube:player_client=android",
+                "-f",
+                "bestaudio/best",
+                "-o",
+                audio_path,
+                video_url,
+            ],
+            [
+                sys.executable,
+                "-m",
+                "yt_dlp",
+                "-q",
+                "--cookies-from-browser",
+                "safari",
+                "--extractor-args",
+                "youtube:player_client=android",
+                "-f",
+                "bestaudio/best",
+                "-o",
+                audio_path,
+                video_url,
+            ],
+        ]
+
+        last_err = None
+        for cmd in ytdlp_attempts:
+            try:
+                subprocess.run(cmd, check=True, env=env)
+                last_err = None
+                break
+            except subprocess.CalledProcessError as e:
+                last_err = e
+
+        if last_err is not None:
+            raise RuntimeError("yt-dlp could not download audio (403/cookies issue)") from last_err
+
+        audio_file = next(Path(tmp).glob("audio.*"), None)
+        if audio_file is None:
+            raise RuntimeError("failed to download audio for ASR")
+
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "whisper",
+                str(audio_file),
+                "--model",
+                "turbo",
+                "--task",
+                "transcribe",
+                "--output_format",
+                "json",
+                "--output_dir",
+                tmp,
+            ],
+            check=True,
+            env=env,
+        )
+
+        json_out = Path(tmp) / f"{audio_file.stem}.json"
+        if not json_out.exists():
+            raise RuntimeError("whisper did not produce json output")
+
+        data = json.loads(json_out.read_text(encoding="utf-8"))
+        segs = data.get("segments") or []
+        entries = []
+        for s in segs:
+            text = (s.get("text") or "").strip()
+            if not text:
+                continue
+            entries.append({"start": float(s.get("start") or 0.0), "text": text})
+        return entries
+
+
+def get_transcript(video_id: str, video_url: str):
     api = YouTubeTranscriptApi()
     preferred = ["en", "zh-CN", "zh", "zh-Hans", "zh-Hant"]
     fetched = None
 
     try:
         fetched = api.fetch(video_id, languages=preferred)
-    except NoTranscriptFound:
-        # fallback: pick the first available transcript
-        tl = api.list(video_id)
-        t = next(iter(tl), None)
-        if t is None:
-            raise
-        fetched = t.fetch()
-
-    entries = []
-    for item in fetched:
-        entries.append({"start": float(item.start), "text": (item.text or "").strip()})
-    return [e for e in entries if e["text"]]
+        entries = []
+        for item in fetched:
+            entries.append({"start": float(item.start), "text": (item.text or "").strip()})
+        return [e for e in entries if e["text"]], "youtube-subtitles"
+    except (NoTranscriptFound, TranscriptsDisabled):
+        entries = asr_fallback(video_url)
+        return [e for e in entries if e["text"]], "asr-fallback"
 
 
 def build_chapters(meta: dict):
@@ -240,7 +355,7 @@ def transcript_as_lines(transcript: list) -> str:
     return "\n".join(lines)
 
 
-def render_with_gemini(meta: dict, chapters: list, transcript: list, source_url: str, prompt_text: str) -> str:
+def render_with_gemini(meta: dict, chapters: list, transcript: list, source_url: str, prompt_text: str, transcript_source: str) -> str:
     if which("gemini") is None:
         raise RuntimeError("gemini CLI not found")
 
@@ -260,6 +375,7 @@ Now produce final transcript for this video:
 - Title: {title}
 - URL: {source_url}
 - Speaker hint: {uploader}
+- Transcript source: {transcript_source}
 
 Detected chapters:
 {chapter_text}
@@ -302,17 +418,20 @@ def main():
 
     meta = get_metadata(args.url)
     vid = video_id_from_url(args.url)
-    transcript = get_transcript(vid)
+    transcript, transcript_source = get_transcript(vid, args.url)
     chapters = build_chapters(meta)
 
     try:
         if prompt_text:
-            note = render_with_gemini(meta, chapters, transcript, args.url, prompt_text)
+            note = render_with_gemini(meta, chapters, transcript, args.url, prompt_text, transcript_source)
         else:
             note = render(meta, chapters, transcript, args.url, vid, args.prompt)
     except Exception as e:
         print(f"WARN: gemini formatting failed, fallback to local renderer: {e}")
         note = render(meta, chapters, transcript, args.url, vid, args.prompt)
+
+    if transcript_source == "asr-fallback":
+        note = note.rstrip() + "\n\nsource: asr-fallback\n"
 
     out_dir = vault / args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
