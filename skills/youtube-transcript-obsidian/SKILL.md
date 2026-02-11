@@ -13,6 +13,13 @@ Use this skill to turn a YouTube URL into a Markdown transcript note in Obsidian
 - Prompt source: `Inbox/Youtube Transcript prompt.md`
 - Output folder: `Inbox/YouTube Transcripts`
 
+## Default models / methods
+
+- Transcript source (priority):
+  1. `youtube-subtitles` (youtube-transcript-api)
+  2. `asr-fallback` (Whisper, when subtitles are unavailable/disabled)
+- Restructure model: `gemini-3-pro` (via Gemini CLI)
+
 ## Run
 
 ```bash
@@ -26,22 +33,29 @@ bash scripts/youtube_to_obsidian.sh \
   --vault "~/Documents/ObsidianVault" \
   --out-dir "Inbox/YouTube Transcripts" \
   --prompt "Inbox/Youtube Transcript prompt.md" \
+  --gemini-model "gemini-3-pro" \
   "<youtube_url>"
+```
+
+ASR test mode (force Whisper even when subtitles exist):
+
+```bash
+bash scripts/youtube_to_obsidian.sh --force-asr "<youtube_url>"
 ```
 
 ## What it does
 
-1. Fetch video metadata (title/chapters) via `yt-dlp`.
-2. Fetch transcript via `youtube-transcript-api`.
-3. Build Markdown with:
-   - video title
-   - `Table of Contents`
-   - chapter headings `[HH:MM:SS] Chapter Title`
-   - paragraph lines ending with `[HH:MM:SS]`
-4. Save the note into your Obsidian vault.
+1. Fetch video metadata via `yt-dlp`.
+2. Try subtitles via `youtube-transcript-api`.
+3. If subtitles fail/disabled, use Whisper ASR fallback.
+4. Send prompt + chapters + raw transcript lines to Gemini CLI for strict prompt-based restructuring.
+5. Save the note into your Obsidian vault.
+6. Append run metadata at the end of note:
+   - `transcription_method: ...`
+   - `restructure_model: ...`
 
 ## Notes
 
-- Uses auto-generated captions when human captions are unavailable.
-- Speaker labels are best-effort (`Speaker 1`) since YouTube captions usually do not include diarization.
-- If YouTube metadata has chapter list, it is used for segmentation first.
+- Chapters use YouTube metadata first, then attempt parsing from description timestamps.
+- Output format is driven by `Inbox/Youtube Transcript prompt.md` when present.
+- If Gemini formatting fails, script falls back to local renderer.

@@ -387,7 +387,15 @@ def transcript_as_lines(transcript: list) -> str:
     return "\n".join(lines)
 
 
-def render_with_gemini(meta: dict, chapters: list, transcript: list, source_url: str, prompt_text: str, transcript_source: str) -> str:
+def render_with_gemini(
+    meta: dict,
+    chapters: list,
+    transcript: list,
+    source_url: str,
+    prompt_text: str,
+    transcript_source: str,
+    gemini_model: str,
+) -> str:
     if which("gemini") is None:
         raise RuntimeError("gemini CLI not found")
 
@@ -423,7 +431,11 @@ Hard constraints:
 5) Follow Dialogue Paragraphs rule in the spec exactly.
 """.strip()
 
-    proc = subprocess.run(["gemini", instruction], capture_output=True, text=True)
+    cmd = ["gemini"]
+    if gemini_model:
+        cmd += ["--model", gemini_model]
+    cmd += [instruction]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "gemini command failed")
     output = (proc.stdout or "").strip()
@@ -438,6 +450,7 @@ def main():
     ap.add_argument("--vault", required=True)
     ap.add_argument("--out-dir", default="Inbox/YouTube Transcripts")
     ap.add_argument("--prompt", default="Inbox/Youtube Transcript prompt.md")
+    ap.add_argument("--gemini-model", default="gemini-3-pro")
     ap.add_argument("--force-asr", action="store_true")
     args = ap.parse_args()
 
@@ -456,15 +469,25 @@ def main():
 
     try:
         if prompt_text:
-            note = render_with_gemini(meta, chapters, transcript, args.url, prompt_text, transcript_source)
+            note = render_with_gemini(
+                meta,
+                chapters,
+                transcript,
+                args.url,
+                prompt_text,
+                transcript_source,
+                args.gemini_model,
+            )
         else:
             note = render(meta, chapters, transcript, args.url, vid, args.prompt)
     except Exception as e:
         print(f"WARN: gemini formatting failed, fallback to local renderer: {e}")
         note = render(meta, chapters, transcript, args.url, vid, args.prompt)
 
-    if transcript_source == "asr-fallback":
-        note = note.rstrip() + "\n\nsource: asr-fallback\n"
+    note = note.rstrip() + (
+        f"\n\n---\ntranscription_method: {transcript_source}\n"
+        f"restructure_model: {args.gemini_model if prompt_text else 'local-renderer'}\n"
+    )
 
     out_dir = vault / args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
